@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Vault Data (Critical Security)
+*.json
+!requirements.txt
+!package.json
+!manifest.json
+# Specifically ignore the vault if it ends up in the local dir
+secure_vault.json
+test_vault.json
+
+# IDEs
+.vscode/
+.idea/
