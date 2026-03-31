@@ -11,7 +11,7 @@ from argon2.low_level import hash_secret_raw, Type
 # ... inputs ...
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
-import pyperclip
+# pyperclip removed — using tkinter native clipboard instead
 
 # --- Constants ---
 VAULT_PATH = os.path.expanduser("~/.secure_vault.json")
@@ -304,6 +304,7 @@ class PasswordManagerApp:
         ttk.Button(btn_frame, text="Add Entry", command=self.add_entry_dialog).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Delete Selected", command=self.delete_selected).pack(side=tk.LEFT, padx=5)
         
+        ttk.Button(btn_frame, text="Show Password", command=self.show_password).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="Copy Password", command=self.copy_password).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="Copy Username", command=self.copy_username).pack(side=tk.RIGHT, padx=5)
 
@@ -314,15 +315,11 @@ class PasswordManagerApp:
             self.tree.delete(item)
             
         entries = self.storage.get_entries(self.security)
+        self.current_entries_map = {}
         for entry in entries:
-            # Mask password
-            self.tree.insert("", tk.END, values=(entry['site'], entry['username'], "********"), tags=(str(entry['id']),))
-            # Store real data in a separate cache if needed, or re-fetch. 
-            # For simplicity, we just rely on index matching or tag-lookup if distinct.
-            # Here we used index logic in delete, but let's store the full object in a dict for easy lookup?
-            # Actually, Treeview items are unique IDs. We can map Treeview ID -> Entry Data.
-            
-        self.current_entries_map = {self.tree.get_children()[i]: entries[i] for i in range(len(entries))}
+            # Mask password; capture the iid returned by insert for reliable lookup
+            iid = self.tree.insert("", tk.END, values=(entry['site'], entry['username'], "********"), tags=(str(entry['id']),))
+            self.current_entries_map[iid] = entry
 
     def add_entry_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -342,8 +339,31 @@ class PasswordManagerApp:
         user_entry.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Label(frame, text="Password:").pack(anchor=tk.W)
-        pass_entry = ttk.Entry(frame, width=40) # Show password for verification
-        pass_entry.pack(fill=tk.X, pady=(0, 20))
+        pass_frame = ttk.Frame(frame)
+        pass_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        pass_entry = ttk.Entry(pass_frame, width=30, show="*")
+        pass_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        show_btn = ttk.Button(pass_frame, text="Show")
+        show_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
+        def toggle_password():
+            if pass_entry.cget("show") == "":
+                pass_entry.config(show="*")
+                show_btn.config(text="Show")
+            else:
+                master_pass = simpledialog.askstring("Master Password", "Enter Master Password to view:", show="*", parent=dialog)
+                if not master_pass:
+                    return
+                temp_security = VaultSecurity()
+                if self.storage.unlock_vault(master_pass, temp_security):
+                    pass_entry.config(show="")
+                    show_btn.config(text="Hide")
+                else:
+                    messagebox.showerror("Access Denied", "Incorrect Master Password", parent=dialog)
+
+        show_btn.config(command=toggle_password)
         
         def on_save():
             if not site_entry.get() or not pass_entry.get():
@@ -380,13 +400,51 @@ class PasswordManagerApp:
             self.storage.delete_entry(entry['id'])
             self.refresh_entries()
 
+    def show_password(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Select Entry", "Please select an entry first.")
+            return
+            
+        master_pass = simpledialog.askstring("Master Password", "Enter Master Password to view:", show="*")
+        if not master_pass:
+            return
+            
+        temp_security = VaultSecurity()
+        if not self.storage.unlock_vault(master_pass, temp_security):
+            messagebox.showerror("Access Denied", "Incorrect Master Password")
+            return
+            
+        item_id = selected[0]
+        entry = self.current_entries_map[item_id]
+        
+        # Display password in a selectable read-only entry dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("View Password")
+        dialog.geometry("350x150")
+        dialog.configure(bg="#2d2d2d")
+        
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="Password for " + str(entry['site']) + ":").pack(pady=(0, 5))
+        
+        pass_disp = ttk.Entry(frame, font=("Consolas", 12))
+        pass_disp.insert(0, str(entry['password']))
+        pass_disp.config(state="readonly")
+        pass_disp.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Button(frame, text="Close", command=dialog.destroy).pack()
+
     def copy_username(self):
         selected = self.tree.selection()
         if not selected:
             return
         item_id = selected[0]
         entry = self.current_entries_map[item_id]
-        pyperclip.copy(entry['username'])
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(entry['username']))
+        self.root.update()  # Flush so the clipboard is available immediately
         messagebox.showinfo("Copied", "Username copied to clipboard")
 
     def copy_password(self):
@@ -395,22 +453,27 @@ class PasswordManagerApp:
             return
         item_id = selected[0]
         entry = self.current_entries_map[item_id]
-        
-        pyperclip.copy(entry['password'])
-        
+        password = str(entry['password'])
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(password)
+        self.root.update()  # Flush so the clipboard is available immediately
+
         # UI Feedback
         original_title = self.root.title()
         self.root.title(f"{original_title} - Password Copied! Clipboard clears in 10s")
-        
+
         def clear_clipboard():
-            # Only clear if it matches what we copied (to avoid clearing user's newer copy)
-            # Actually requirements said just "Clear automatically". 
-            # Safer to just clear or overwrite.
-            current = pyperclip.paste()
-            if current == entry['password']:
-                pyperclip.copy("")
-                self.root.title(original_title)
-                
+            try:
+                current = self.root.clipboard_get()
+                if current == password:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append("")
+                    self.root.update()
+            except Exception:
+                pass  # Clipboard may already be cleared
+            self.root.after(0, lambda: self.root.title(original_title))
+
         # Start timer
         threading.Timer(10.0, clear_clipboard).start()
 
