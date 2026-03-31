@@ -40,7 +40,8 @@ A secure, local, desktop-based password manager built with Python. It strictly a
     - **WARNING**: If you lose this password, your data is effectively lost forever. There is no recovery mechanism.
 
 3.  **Features**:
-    - **Add Entry**: Store Site, Username, and Password.
+    - **Add Entry**: Store Site, Username, and Password (password is hidden by default and requires the Master Password to un-hide).
+    - **Show Password**: Securely displays a selected password in a read-only dialog, but only after re-verifying your Master Password.
     - **Copy Password**: Copies to clipboard and auto-clears after 10s.
     - **Lock Vault**: Instantly clears encryption keys from memory.
 
