@@ -25,7 +25,7 @@ class VaultSecurity:
     def __init__(self):
         self.key = None
 
-    def derive_key(self, password: str, salt: bytes) -> bytes:
+    def derive_key(self, password: str, salt: bytes, time_cost: int = 4) -> bytes:
         """
         Derive a 32-byte key from the password and salt using Argon2id.
         Using argon2-cffi library.
@@ -33,7 +33,7 @@ class VaultSecurity:
         return hash_secret_raw(
             secret=password.encode(),
             salt=salt,
-            time_cost=2,
+            time_cost=time_cost,
             memory_cost=64 * 1024, # 64 MB
             parallelism=4,
             hash_len=KEY_SIZE,
@@ -81,6 +81,18 @@ class VaultStorage:
         temp_path = self.filepath + ".tmp"
         with open(temp_path, 'w') as f:
             json.dump(data, f, indent=4)
+            
+        # Securely overwrite the old file with random data before replacing
+        if os.path.exists(self.filepath):
+            try:
+                file_size = os.path.getsize(self.filepath)
+                with open(self.filepath, 'r+b') as f:
+                    f.write(secrets.token_bytes(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception as e:
+                print(f"Failed to securely wipe old file: {e}")
+
         os.replace(temp_path, self.filepath)
 
     def create_vault(self, password: str, security: VaultSecurity):
@@ -113,22 +125,22 @@ class VaultStorage:
         data = self.load_raw()
         salt = base64.b64decode(data['salt'])
         
-        # Derive potential key
-        potential_key = security.derive_key(password, salt)
-        temp_security = VaultSecurity()
-        temp_security.key = potential_key
-        
         # Try to decrypt validation token
         val_nonce = base64.b64decode(data['validation_token']['nonce'])
         val_cipher = base64.b64decode(data['validation_token']['ciphertext'])
         
-        try:
-            decrypted = temp_security.decrypt(val_nonce, val_cipher)
-            if decrypted == b"VALID":
-                security.key = potential_key # Set the actual key
-                return True
-        except InvalidTag:
-            pass
+        # Try backwards compatibility for older vaults that used time_cost=2
+        for t_cost in [4, 2]:
+            potential_key = security.derive_key(password, salt, time_cost=t_cost)
+            temp_security = VaultSecurity()
+            temp_security.key = potential_key
+            try:
+                decrypted = temp_security.decrypt(val_nonce, val_cipher)
+                if decrypted == b"VALID":
+                    security.key = potential_key # Set the actual key
+                    return True
+            except InvalidTag:
+                pass
         return False
 
     def add_entry(self, entry_data: dict, security: VaultSecurity):
@@ -138,7 +150,11 @@ class VaultStorage:
         """
         data = self.load_raw()
         
-        json_bytes = json.dumps(entry_data).encode('utf-8')
+        # Add random padding to mask the JSON length
+        padded_entry = entry_data.copy()
+        padded_entry['__padding'] = base64.b64encode(secrets.token_bytes(256)).decode('utf-8')
+        
+        json_bytes = json.dumps(padded_entry).encode('utf-8')
         nonce, ciphertext = security.encrypt(json_bytes)
         
         new_entry = {
@@ -163,6 +179,7 @@ class VaultStorage:
                 ciphertext = base64.b64decode(entry['ciphertext'])
                 plaintext = security.decrypt(nonce, ciphertext)
                 entry_dict = json.loads(plaintext.decode('utf-8'))
+                entry_dict.pop('__padding', None) # Remove padding if it exists
                 entry_dict['id'] = idx # Store index for deletion
                 decrypted_entries.append(entry_dict)
             except Exception as e:
@@ -191,10 +208,28 @@ class PasswordManagerApp:
         self.security = VaultSecurity()
         self.storage = VaultStorage()
         
+        # Auto-lock variables
+        self.auto_lock_time = 5 * 60 * 1000 # 5 minutes in ms
+        self.lock_job = None
+        self.root.bind_all("<Key>", self.reset_timer)
+        self.root.bind_all("<Button>", self.reset_timer)
+        self.root.bind_all("<Motion>", self.reset_timer)
+        
         self.main_frame = ttk.Frame(root, padding="20")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         
         self.show_initial_screen()
+
+    def reset_timer(self, event=None):
+        if self.lock_job:
+            self.root.after_cancel(self.lock_job)
+        if self.security.key:
+            self.lock_job = self.root.after(self.auto_lock_time, self.auto_lock_vault)
+
+    def auto_lock_vault(self):
+        if self.security.key:
+            messagebox.showinfo("Auto-Lock", "Vault locked due to inactivity.")
+            self.lock_vault()
 
     def configure_styles(self):
         style = ttk.Style()
@@ -478,6 +513,9 @@ class PasswordManagerApp:
         threading.Timer(10.0, clear_clipboard).start()
 
     def lock_vault(self):
+        if self.lock_job:
+            self.root.after_cancel(self.lock_job)
+            self.lock_job = None
         self.security.key = None # Clear key from memory
         self.show_login_screen()
 
